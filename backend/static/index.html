@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AeroLens — UAV Flight Telemetry &amp; Anomaly Dashboard</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root { --bg:#060911; --panel:#0c1322; --border:#1b2842; --text:#e2e8f0; --muted:#8ea0b8; --cyan:#38bdf8; --emerald:#10b981; --amber:#f59e0b; --rose:#f43f5e; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:Inter,system-ui,sans-serif; }
+    header { display:flex; justify-content:space-between; align-items:center; padding:14px 22px; border-bottom:1px solid var(--border); background:#090e1a; }
+    header h1 { margin:0; font-size:17px; letter-spacing:0.1em; }
+    main { max-width:1440px; margin:0 auto; padding:18px; display:grid; grid-template-columns:300px 1fr; gap:16px; }
+    @media (max-width:960px) { main { grid-template-columns:1fr; } }
+    .panel { background:var(--panel); border:1px solid var(--border); border-radius:11px; padding:14px; margin-bottom:14px; }
+    .flight-btn { width:100%; text-align:left; padding:10px; margin-bottom:8px; background:#10192d; border:1px solid var(--border); color:var(--text); border-radius:8px; cursor:pointer; }
+    .flight-btn.active { border-color:var(--cyan); background:rgba(56,189,248,0.1); }
+    .charts { display:grid; grid-template-columns:repeat(auto-fit,minmax(460px,1fr)); gap:14px; }
+    .plot { height:260px; width:100%; }
+    .btn { display:inline-block; background:#0284c7; color:#fff; padding:7px 12px; border-radius:7px; text-decoration:none; border:none; cursor:pointer; font-size:12.5px; font-weight:600; margin-right:6px; }
+    .muted { color:var(--muted); font-size:12px; }
+  </style>
+</head>
+<body>
+<header>
+  <div><h1>AEROLENS // FLIGHT ANALYTICS</h1><span class="muted">Live FastAPI Telemetry &amp; Anomaly Dashboard</span></div>
+  <div id="exports"></div>
+</header>
+<main>
+  <aside>
+    <div class="panel">
+      <h3>Upload Flight Log</h3>
+      <input type="file" id="file-input" style="width:100%;margin-bottom:8px" />
+      <button class="btn" onclick="uploadSelected()">Upload &amp; Analyze</button>
+    </div>
+    <div class="panel">
+      <h3>Flights</h3>
+      <div id="flight-list">Loading...</div>
+    </div>
+  </aside>
+  <section>
+    <div class="panel" id="summary-box">Select a flight to inspect telemetry.</div>
+    <div class="charts">
+      <div class="panel"><strong>Power &amp; Voltage Sag</strong><div id="plot-power" class="plot"></div></div>
+      <div class="panel"><strong>Attitude Roll/Pitch Tracking</strong><div id="plot-att" class="plot"></div></div>
+      <div class="panel"><strong>Vibration Magnitude</strong><div id="plot-vibe" class="plot"></div></div>
+      <div class="panel"><strong>SciPy Vibration FFT Spectrum</strong><div id="plot-fft" class="plot"></div></div>
+    </div>
+    <div class="panel"><h3>Detected Anomalies</h3><div id="anomaly-box"></div></div>
+  </section>
+</main>
+<script>
+let activeId = null;
+async function loadFlights() {
+  const list = await fetch('/api/flights').then(r => r.json());
+  const box = document.getElementById('flight-list');
+  box.innerHTML = '';
+  list.forEach(f => {
+    const b = document.createElement('button');
+    b.className = 'flight-btn' + (f.id === activeId ? ' active' : '');
+    b.innerHTML = `<strong>${f.name}</strong><div class="muted">${f.health_score.toFixed(0)}/100 (${f.health_grade}) • ${f.format_id}</div>`;
+    b.onclick = () => selectFlight(f.id);
+    box.appendChild(b);
+  });
+  if (!activeId && list.length) selectFlight(list[0].id);
+}
+async function selectFlight(id) {
+  activeId = id;
+  const [detail, tel] = await Promise.all([
+    fetch(`/api/flights/${id}`).then(r => r.json()),
+    fetch(`/api/flights/${id}/telemetry?max_points=1800`).then(r => r.json())
+  ]);
+  document.getElementById('exports').innerHTML =
+    `<a class="btn" href="/api/flights/${id}/export/pdf">PDF</a>` +
+    `<a class="btn" href="/api/flights/${id}/export/html">HTML</a>` +
+    `<a class="btn" href="/api/flights/${id}/export/csv">CSV</a>`;
+  const s = detail.summary;
+  document.getElementById('summary-box').innerHTML =
+    `<strong>${detail.name}</strong> &bull; Score: <strong>${s.health_score}/100 (${s.health_grade}, ${s.flight_status})</strong>` +
+    ` &bull; R_int: ${s.internal_resistance_mohm ?? 'N/A'} mΩ &bull; Vibe RMS: ${s.vibe_rms_total ?? 'N/A'} m/s²` +
+    ` &bull; FFT Peak: ${s.dominant_vibe_freq_hz ?? 'N/A'} Hz`;
+  document.getElementById('anomaly-box').innerHTML = detail.anomalies.length
+    ? detail.anomalies.map(a => `<div style="margin-bottom:8px"><strong>[${a.severity.toUpperCase()}] ${a.title}</strong><div class="muted">${a.description}</div></div>`).join('')
+    : '<span class="muted">No anomalies detected.</span>';
+  const t = tel.records.map(r => r.timestamp_s);
+  const lay = { paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'#090f1d', font:{color:'#cbd5e1'}, margin:{l:42,r:18,t:16,b:32} };
+  if (window.Plotly) {
+    Plotly.newPlot('plot-power', [{x:t,y:tel.records.map(r=>r.voltage_v),name:'Voltage'},{x:t,y:tel.records.map(r=>r.v_oc_est),name:'V_oc'}], lay);
+    Plotly.newPlot('plot-att', [{x:t,y:tel.records.map(r=>r.roll_deg),name:'Roll'},{x:t,y:tel.records.map(r=>r.roll_des_deg),name:'DesRoll'}], lay);
+    Plotly.newPlot('plot-vibe', [{x:t,y:tel.records.map(r=>r.vibe_mag),name:'Vibe Mag'}], lay);
+    Plotly.newPlot('plot-fft', [{x:detail.fft_spectrum.frequencies_hz||[],y:detail.fft_spectrum.amplitudes||[],name:'FFT'}], lay);
+  }
+  loadFlights();
+}
+async function uploadSelected() {
+  const inp = document.getElementById('file-input');
+  if (!inp.files.length) return;
+  const fd = new FormData();
+  fd.append('file', inp.files[0]);
+  const res = await fetch('/api/flights/upload', {method:'POST', body:fd});
+  if (res.ok) { const d = await res.json(); activeId = d.id; await selectFlight(d.id); }
+}
+loadFlights();
+</script>
+</body>
+</html>
